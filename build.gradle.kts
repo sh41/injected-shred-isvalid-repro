@@ -17,6 +17,10 @@ dependencies {
 }
 
 tasks.test {
+    // The tests write their tables and JFR recordings here.
+    systemProperty("repro.outputDir", layout.buildDirectory.dir("repro").get().asFile.absolutePath)
+    // JFR keeps 64 frames by default, which cuts most highlighting stacks short of the pass that started them.
+    jvmArgs("-XX:FlightRecorderOptions:stackdepth=512")
     testLogging {
         events("failed")
         exceptionFormat = TestExceptionFormat.FULL
