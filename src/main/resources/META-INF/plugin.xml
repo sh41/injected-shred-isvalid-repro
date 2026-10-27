@@ -1,0 +1,11 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>com.github.sh41.injectedshredisvalidrepro</id>
+    <name>injected-shred-isvalid-repro</name>
+    <vendor>sh41</vendor>
+    <description><![CDATA[
+        <p>Minimal reproduction project for an IntelliJ Platform issue.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+</idea-plugin>
