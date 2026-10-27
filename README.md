@@ -1,5 +1,7 @@
 # DocumentWindowImpl.isValid costs one host validity check per shred
 
+Reported as [IJPL-259786](https://youtrack.jetbrains.com/issue/IJPL-259786).
+
 Minimal reproduction for an IntelliJ Platform performance issue, on IntelliJ IDEA 2026.1.5 (`IU-261.27258.48`). Built from the [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template).
 
 ## Summary
