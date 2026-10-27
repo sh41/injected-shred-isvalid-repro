@@ -1,9 +1,14 @@
 package com.github.sh41.injectedshredisvalidrepro
 
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
+import com.intellij.codeInsight.daemon.LineMarkerProviders
 import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.codeInsight.daemon.impl.HighlightInfoType
+import com.intellij.execution.lineMarker.RunLineMarkerProvider
 import com.intellij.injected.editor.DocumentWindow
+import com.intellij.lang.LanguageAnnotators
+import com.intellij.lang.annotation.AnnotationHolder
+import com.intellij.lang.annotation.Annotator
 import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.lang.injection.MultiHostInjector
 import com.intellij.lang.injection.MultiHostRegistrar
@@ -18,6 +23,7 @@ import com.intellij.psi.PsiLanguageInjectionHost
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlTag
 import com.intellij.psi.xml.XmlText
+import com.intellij.testFramework.ExtensionTestUtil
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import jdk.jfr.Configuration
 import jdk.jfr.Recording
@@ -25,6 +31,7 @@ import org.intellij.lang.regexp.RegExpLanguage
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Times `DocumentWindow.isValid()` and one highlighting pass over a RegExp injection into one XML text node of N lines,
@@ -286,6 +293,95 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
                     .format(singleRatio) +
                 "${perLineSmall.passMillis.median} ms to ${perLineLarge.passMillis.median} ms, a ratio of %.2f"
                     .format(perLineRatio),
+            perLineRatio <= singleRatio * MARGIN
+        )
+    }
+
+    /**
+     * Asks every leaf whether it is in an injected fragment, as the Elixir plugin's `UnicodeSecurity` annotator does
+     * through `Injection.of`: `element.containingFile`, then `isInjectedFragment`. Sums the time those two calls take
+     * and counts them, across the threads the annotator runs on. The counters are static because `AnnotatorRunner`
+     * runs a new instance of each annotator (`cloneTemplate`), not the one registered.
+     */
+    private class InjectedLeafAnnotator : Annotator {
+        companion object {
+            val nanos = AtomicLong()
+            val calls = AtomicLong()
+        }
+
+        override fun annotate(element: PsiElement, holder: AnnotationHolder) {
+            if (element.firstChild != null) return
+            val start = System.nanoTime()
+            val file = element.containingFile
+            if (file != null) InjectedLanguageManager.getInstance(element.project).isInjectedFragment(file)
+            nanos.addAndGet(System.nanoTime() - start)
+            calls.incrementAndGet()
+        }
+    }
+
+    /** One [measure] cell, with the [InjectedLeafAnnotator] time and calls per timed pass. */
+    private data class AnnotatorCell(val cell: Cell, val millisPerPass: Double, val callsPerPass: Long)
+
+    /**
+     * [testPerLineHighlightingScalesLinearly] with the caller moved from the line-marker pass to the annotator pass:
+     * `RunLineMarkerProvider` is masked, and [InjectedLeafAnnotator] is registered for RegExp. The assertion is on the
+     * annotator's own time, not the pass time, so the rest of the pass and the load on the machine do not dilute it.
+     * Both shapes give the annotator the same leaves, so with an O(1) `isValid()` its time would at most double when
+     * the lines double, as it does for the single-place control in the same run. The per-line N = 2,000 cell is recorded.
+     */
+    fun testPerLineAnnotatorScalesLinearly() {
+        ExtensionTestUtil.maskExtensions(
+            LineMarkerProviders.EP_NAME,
+            LineMarkerProviders.EP_NAME.extensionList.filter { it.implementationClass != RunLineMarkerProvider::class.java.name },
+            testRootDisposable
+        )
+        LanguageAnnotators.INSTANCE.addExplicitExtension(RegExpLanguage.INSTANCE, InjectedLeafAnnotator(), testRootDisposable)
+        val annotator = InjectedLeafAnnotator
+        val jfrLines = mutableListOf<String>()
+
+        fun measureAnnotator(shape: Shape, lines: Int, record: Boolean = false): AnnotatorCell {
+            var millisPerPass = 0.0
+            var callsPerPass = 0L
+            val cell = measure(shape, lines, 1) { passes ->
+                annotator.nanos.set(0)
+                annotator.calls.set(0)
+                if (record) jfrLines.add(recordJfr("annotator-per-line-$lines", passes)) else passes()
+                millisPerPass = annotator.nanos.get() / 1e6 / TIMED_PASSES
+                callsPerPass = annotator.calls.get() / TIMED_PASSES
+            }
+            return AnnotatorCell(cell, millisPerPass, callsPerPass)
+        }
+
+        // Discarded: run on its own, the test's first cell is also the JVM's first highlighting, and comes out slow.
+        measureAnnotator(Shape.SINGLE_PLACE, 1000)
+        val singleSmall = measureAnnotator(Shape.SINGLE_PLACE, 1000)
+        val singleLarge = measureAnnotator(Shape.SINGLE_PLACE, 2000)
+        val perLineSmall = measureAnnotator(Shape.PER_LINE, 1000)
+        val perLineLarge = measureAnnotator(Shape.PER_LINE, 2000, record = true)
+        assertEquals("the annotator's calls per pass at N=1000", singleSmall.callsPerPass, perLineSmall.callsPerPass)
+        assertEquals("the annotator's calls per pass at N=2000", singleLarge.callsPerPass, perLineLarge.callsPerPass)
+
+        val singleRatio = singleLarge.millisPerPass / singleSmall.millisPerPass
+        val perLineRatio = perLineLarge.millisPerPass / perLineSmall.millisPerPass
+        val cells = listOf(singleSmall, singleLarge, perLineSmall, perLineLarge)
+        report(
+            "annotator-ratio",
+            cells.map { it.cell },
+            listOf("", "| shape | N | annotator calls per pass | annotator ms per pass |", "|---|---|---|---|") +
+                cells.map { "| ${it.cell.shape.label} | ${it.cell.lines} | ${it.callsPerPass} | %.3f |".format(it.millisPerPass) } +
+                listOf(
+                    "",
+                    "annotator time: single-place ratio %.3f, per-line ratio %.3f".format(singleRatio, perLineRatio),
+                    "",
+                ) + jfrLines
+        )
+
+        assertTrue(
+            "doubling the lines of a per-line injection should grow the time an annotator spends asking each injected " +
+                "leaf for its file no faster than doubling a single-place injection does (ratio %.2f), give or take a "
+                    .format(singleRatio) +
+                "margin of $MARGIN, but it went from %.1f ms to %.1f ms a pass, a ratio of %.2f"
+                    .format(perLineSmall.millisPerPass, perLineLarge.millisPerPass, perLineRatio),
             perLineRatio <= singleRatio * MARGIN
         )
     }
