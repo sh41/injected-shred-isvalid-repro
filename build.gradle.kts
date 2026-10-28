@@ -11,7 +11,10 @@ dependencies {
 
     // IntelliJ Platform Gradle Plugin Dependencies Extension - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-dependencies-extension.html
     intellijPlatform {
-        intellijIdea("2026.1.5")
+        intellijIdea("263.7307.44")
+        // From 2026.3, XML PSI is in the bundled XML plugin and RegExp is a separate product module.
+        bundledPlugin("com.intellij.xml")
+        bundledModule("intellij.regexp")
         testFramework(TestFrameworkType.Platform)
     }
 }

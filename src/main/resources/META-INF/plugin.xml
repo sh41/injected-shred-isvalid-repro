@@ -8,4 +8,6 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.xml</depends>
+    <depends>com.intellij.modules.regexp</depends>
 </idea-plugin>
