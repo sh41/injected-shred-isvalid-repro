@@ -15,6 +15,8 @@ dependencies {
         // From 2026.3, XML PSI is in the bundled XML plugin and RegExp is a separate product module.
         bundledPlugin("com.intellij.xml")
         bundledModule("intellij.regexp")
+        // testJavadocSnippetSweep: the platform's JavadocInjector is in the bundled Java plugin.
+        bundledPlugin("com.intellij.java")
         testFramework(TestFrameworkType.Platform)
     }
 }

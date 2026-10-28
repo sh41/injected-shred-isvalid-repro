@@ -20,6 +20,7 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiLanguageInjectionHost
+import com.intellij.psi.javadoc.PsiSnippetDocTag
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlTag
 import com.intellij.psi.xml.XmlText
@@ -41,7 +42,7 @@ import java.util.concurrent.atomic.AtomicLong
  * passes over the same file, and [WARM_UP_CALLS] then [TIMED_CALLS] single `isValid()` calls. Each figure is the median
  * of the timed repetitions, with their min and max. The injected file is checked to be the same object before and after,
  * so the timed passes re-highlight one injection rather than re-inject. [testKeystrokeInHost] times the pass after an
- * edit instead.
+ * edit instead. [testJavadocSnippetSweep] times the same lines injected by the platform's own `JavadocInjector`.
  */
 class InjectedShredIsValidTest : BasePlatformTestCase() {
 
@@ -93,7 +94,7 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
     }
 
     private data class Cell(
-        val shape: Shape,
+        val label: String,
         val lines: Int,
         val depth: Int,
         val shreds: Int,
@@ -103,7 +104,7 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
         val otherInfos: Int,
     ) {
         fun row(): String =
-            "| ${shape.label} | $lines | $depth | $shreds | $isValidMicros | $passMillis | $backgroundInfos | $otherInfos |"
+            "| $label | $lines | $depth | $shreds | $isValidMicros | $passMillis | $backgroundInfos | $otherInfos |"
     }
 
     private val injector = ShapedInjector()
@@ -140,8 +141,24 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
             shreds
         )
         assertEquals("$shape at N=$lines, D=$depth: injected text", host.text, injectedFile.text)
+        return time(shape.label, lines, depth, host, injectedFile, shreds, around)
+    }
+
+    /**
+     * The timed part of a cell: [TIMED_PASSES] passes, each after a restart, then the `isValid()` calls on the injected
+     * document, and a check that [host] still has [injectedFile] as its one injection.
+     */
+    private fun time(
+        label: String,
+        lines: Int,
+        depth: Int,
+        host: PsiElement,
+        injectedFile: PsiFile,
+        shreds: Int,
+        around: ((() -> Unit) -> Unit)?,
+    ): Cell {
         val window = PsiDocumentManager.getInstance(project).getCachedDocument(injectedFile) as DocumentWindow
-        assertEquals("$shape at N=$lines, D=$depth: host ranges", shreds, window.hostRanges.size)
+        assertEquals("$label at N=$lines, D=$depth: host ranges", shreds, window.hostRanges.size)
 
         var lastInfos: List<HighlightInfo> = emptyList()
         val passMillis = mutableListOf<Double>()
@@ -165,10 +182,10 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
         }
 
         val after = injectedFiles(host)
-        assertSame("$shape at N=$lines, D=$depth: the passes must re-highlight one injection", injectedFile, after.single().first)
+        assertSame("$label at N=$lines, D=$depth: the passes must re-highlight one injection", injectedFile, after.single().first)
 
         val background = lastInfos.count { it.type == HighlightInfoType.INJECTED_LANGUAGE_BACKGROUND }
-        return Cell(shape, lines, depth, shreds, Stats.of(isValidMicros), Stats.of(passMillis), background, lastInfos.size - background)
+        return Cell(label, lines, depth, shreds, Stats.of(isValidMicros), Stats.of(passMillis), background, lastInfos.size - background)
     }
 
     /** One full pass: without the restart, the daemon finds the file up to date and skips its passes. */
@@ -181,7 +198,7 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
         PsiTreeUtil.findChildrenOfType(myFixture.file, XmlText::class.java).single { (it.parent as? XmlTag)?.name == HOST_TAG }
 
     /** Each injected file over [host], with its shred count. */
-    private fun injectedFiles(host: XmlText): List<Pair<PsiFile, Int>> {
+    private fun injectedFiles(host: PsiElement): List<Pair<PsiFile, Int>> {
         val result = mutableListOf<Pair<PsiFile, Int>>()
         InjectedLanguageManager.getInstance(project).enumerate(host) { injectedPsi, places -> result.add(injectedPsi to places.size) }
         return result
@@ -298,6 +315,48 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
     }
 
     /**
+     * A Java class whose Javadoc holds one `{@snippet lang=RegExp : ...}` of [lines] lines of [LINE]. No injector of
+     * this test's is involved: the platform's `JavadocInjector` injects the snippet, one place per content line,
+     * because each line's ` * ` prefix and indent are not part of the snippet.
+     */
+    private fun javadocSnippetFileText(lines: Int): String {
+        val body = (0 until lines).joinToString("") { "     * $LINE\n" }
+        return "class Snippet {\n    /**\n     * {@snippet lang=RegExp :\n" + body + "     * }\n     */\n    void m() {}\n}\n"
+    }
+
+    private fun measureJavadocSnippet(lines: Int, around: ((() -> Unit) -> Unit)? = null): Cell {
+        myFixture.configureByText("Snippet$lines.java", javadocSnippetFileText(lines))
+        repeat(WARM_UP_PASSES) { highlight() }
+
+        val host = PsiTreeUtil.findChildrenOfType(myFixture.file, PsiSnippetDocTag::class.java).single()
+        val injected = injectedFiles(host)
+        assertEquals("javadoc snippet at N=$lines: injected files", 1, injected.size)
+        val (injectedFile, shreds) = injected.single()
+        assertEquals("javadoc snippet at N=$lines: injected language", RegExpLanguage.INSTANCE, injectedFile.language)
+        assertEquals("javadoc snippet at N=$lines: shreds", lines, shreds)
+        assertEquals("javadoc snippet at N=$lines: injected lines", List(lines) { LINE }, injectedFile.text.lines().filter { it.isNotEmpty() })
+        return time(JAVADOC_SNIPPET, lines, 1, host, injectedFile, shreds, around)
+    }
+
+    /**
+     * Reported, not asserted: the per-line cost with the platform's own injector, in a Java file any user can open.
+     * The N = 2,000 cell is recorded.
+     */
+    fun testJavadocSnippetSweep() {
+        val jfrLines = mutableListOf<String>()
+        val cells = MAIN_SWEEP_LINES.map { lines ->
+            val record = lines == MAIN_SWEEP_LINES.max()
+            measureJavadocSnippet(lines, if (record) { passes -> jfrLines.add(recordJfr("javadoc-snippet-$lines", passes)) } else null)
+        }
+        val ratio = cells.last().passMillis.median / cells[cells.size - 2].passMillis.median
+        report(
+            "javadoc-snippet-sweep",
+            cells,
+            listOf("", "pass ratio %d → %d lines: %.3f".format(cells[cells.size - 2].lines, cells.last().lines, ratio), "") + jfrLines
+        )
+    }
+
+    /**
      * Asks every leaf whether it is in an injected fragment, as the Elixir plugin's `UnicodeSecurity` annotator does
      * through `Injection.of`: `element.containingFile`, then `isInjectedFragment`. Sums the time those two calls take
      * and counts them, across the threads the annotator runs on. The counters are static because `AnnotatorRunner`
@@ -368,7 +427,7 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
             "annotator-ratio",
             cells.map { it.cell },
             listOf("", "| shape | N | annotator calls per pass | annotator ms per pass |", "|---|---|---|---|") +
-                cells.map { "| ${it.cell.shape.label} | ${it.cell.lines} | ${it.callsPerPass} | %.3f |".format(it.millisPerPass) } +
+                cells.map { "| ${it.cell.label} | ${it.cell.lines} | ${it.callsPerPass} | %.3f |".format(it.millisPerPass) } +
                 listOf(
                     "",
                     "annotator time: single-place ratio %.3f, per-line ratio %.3f".format(singleRatio, perLineRatio),
@@ -408,6 +467,7 @@ class InjectedShredIsValidTest : BasePlatformTestCase() {
 
     companion object {
         private const val HOST_TAG = "host"
+        private const val JAVADOC_SNIPPET = "javadoc-snippet"
         private const val LINE = "ab+(cd|ef)*[0-9]x?"
 
         private val MAIN_SWEEP_LINES = listOf(250, 500, 1000, 2000)
