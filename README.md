@@ -2,7 +2,29 @@
 
 Reported as [IJPL-259786](https://youtrack.jetbrains.com/issue/IJPL-259786).
 
-Minimal reproduction for an IntelliJ Platform performance issue, on IntelliJ IDEA 2026.1.5 (`IU-261.27258.48`). Built from the [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template).
+Minimal reproduction for an IntelliJ Platform performance issue. Built from the [IntelliJ Platform Plugin Template](https://github.com/JetBrains/intellij-platform-plugin-template). This branch, `2026.3`, builds against IntelliJ IDEA 2026.3 (`IU-263.7307.44`), and [the next section](#on-intellij-idea-20263) gives its results. The rest of this README is the 2026.1.5 (`IU-261.27258.48`) record from `main`, whose source links are to 2026.1.5.
+
+## On IntelliJ IDEA 2026.3
+
+Building against 2026.3 takes three changes: the bundled XML plugin (`bundledPlugin("com.intellij.xml")`), because 2026.3 moves the XML PSI there; the RegExp product module (`bundledModule("intellij.regexp")`); and IntelliJ Platform Gradle Plugin 2.19.0, because 2.16.0 leaves the test framework's runtime classes off the test classpath (`NoClassDefFoundError: com/intellij/rt/execution/junit/FileComparisonData`). The tests are unchanged.
+
+Measured with `./gradlew test --rerun` on `IU-263.7307.44`, OpenJDK 64-Bit Server VM 25.0.4.1+1-b635.75, on the same machine as below. No other build was running when the run started or when it ended. The same two tests fail:
+
+- `doubling the lines of a per-line injection should grow the pass time no faster than doubling a single-place injection does (ratio 2.09), give or take a margin of 1.5, but it went from 895.816796 ms to 3374.67814 ms, a ratio of 3.77`
+- `doubling the lines of a per-line injection should grow the time an annotator spends asking each injected leaf for its file no faster than doubling a single-place injection does (ratio 0.78), give or take a margin of 1.5, but it went from 814.5 ms to 3294.9 ms a pass, a ratio of 4.05`
+
+| | one place per line | one place |
+|---|---|---|
+| `DocumentWindow.isValid()`, N = 250 / 500 / 1,000 / 2,000 | 11.6 / 24.3 / 48.6 / 95.7 µs | 0.14 µs throughout |
+| highlighting pass, N = 250 / 500 / 1,000 / 2,000 | 67 / 253 / 846 / 3,276 ms | 41 / 92 / 154 / 274 ms |
+| highlighting pass, N = 1,000, host tag 1 / 8 / 32 deep | 873 / 1,082 / 1,541 ms | 156 / 158 / 165 ms |
+| pass after one keystroke, N = 2,000 | 3,814 ms | 346 ms |
+| annotator time per pass, N = 1,000 / 2,000 | 814 / 3,295 ms | 11.6 / 9.0 ms |
+
+Medians of five passes and of 1,001 `isValid()` calls. The per-line N = 2,000 pass in the second row ran under the JFR recording; without it, in `testPerLineHighlightingScalesLinearly`, it took 3,375 ms. One `isValid()` call costs about 48 ns per shred, against about 34 ns on 2026.1.5.
+
+The recording of the five per-line passes at N = 2,000 holds 2,059 samples. `DocumentWindowImpl.isValid` is on 76.4% of them: `ShredImpl.getHost` → `SmartPsiElementPointerImpl.getElement` → the host's `isValid` on 41.7%, and `ShredImpl.getHostRangeMarker` → `SmartPsiElementPointerImpl.getRange` on 33.5%. 72.2% of all samples reach it through `LineMarkersPass.queryLineMarkersForInjected` → `queryProviders` → `RunLineMarkerProvider.getLineMarkerInfo` → `LeafPsiElement.getContainingFile` → `PsiFileImpl.isValid` → `VirtualFileWindowImpl.isValid`, and 4.0% through `PsiElementBase.isValid`. All 1,512 `LineMarkersPass` samples are under `ApplicationImpl.tryRunReadAction`, with no read action nested inside the pass. The other per-place frames are `intersectWithAllEditableFragments` (9.6%), `injectedToHost` (4.1%) and `getHostRange` (0.7%). In the annotator test's recording, 2,094 samples, `DocumentWindowImpl.isValid` is on 76.4%, and 72.7% of all samples reach it from the annotator's `getContainingFile`.
+
 
 ## Summary
 
