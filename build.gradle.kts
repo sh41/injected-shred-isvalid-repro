@@ -21,6 +21,16 @@ dependencies {
     }
 }
 
+intellijPlatform {
+    // Inside the project, the sandbox IDE appears to see its own writes; the refresh cancelled highlighting every 15 s.
+    sandboxContainer = file("${System.getProperty("user.home")}/.cache/injected-shred-isvalid-repro/sandbox")
+}
+
+tasks.runIde {
+    // Room for Snippet4000.java beside a full IDE; a 10,000-line snippet runs out even at 4 GB.
+    maxHeapSize = "4g"
+}
+
 tasks.test {
     // The tests write their tables and JFR recordings here.
     systemProperty("repro.outputDir", layout.buildDirectory.dir("repro").get().asFile.absolutePath)
