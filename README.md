@@ -25,6 +25,19 @@ Medians of five passes and of 1,001 `isValid()` calls. The per-line N = 2,000 pa
 
 The recording of the five per-line passes at N = 2,000 holds 2,059 samples. `DocumentWindowImpl.isValid` is on 76.4% of them: `ShredImpl.getHost` → `SmartPsiElementPointerImpl.getElement` → the host's `isValid` on 41.7%, and `ShredImpl.getHostRangeMarker` → `SmartPsiElementPointerImpl.getRange` on 33.5%. 72.2% of all samples reach it through `LineMarkersPass.queryLineMarkersForInjected` → `queryProviders` → `RunLineMarkerProvider.getLineMarkerInfo` → `LeafPsiElement.getContainingFile` → `PsiFileImpl.isValid` → `VirtualFileWindowImpl.isValid`, and 4.0% through `PsiElementBase.isValid`. All 1,512 `LineMarkersPass` samples are under `ApplicationImpl.tryRunReadAction`, with no read action nested inside the pass. The other per-place frames are `intersectWithAllEditableFragments` (9.6%), `injectedToHost` (4.1%) and `getHostRange` (0.7%). In the annotator test's recording, 2,094 samples, `DocumentWindowImpl.isValid` is on 76.4%, and 72.7% of all samples reach it from the annotator's `getContainingFile`.
 
+### The platform's own `JavadocInjector`
+
+The same cost needs no custom injector. [`testJavadocSnippetSweep`][test-javadoc] opens a Java class whose Javadoc holds one `{@snippet lang=RegExp : …}` of N lines of the same RegExp line. The bundled `JavadocInjector` registers one place per content line, because each line's ` * ` prefix and indent are not part of the snippet, so the injection has N shreds. The test reports and does not assert:
+
+| N | shreds | `isValid()` µs | pass ms |
+|---|---|---|---|
+| 250 | 250 | 9.9 [9.8, 41.2] | 137 [123, 165] |
+| 500 | 500 | 18.6 [18.2, 67.7] | 289 [276, 318] |
+| 1,000 | 1,000 | 36.7 [36.3, 85.2] | 967 [886, 1,001] |
+| 2,000 | 2,000 | 73.8 [72.0, 251.6] | 3,698 [3,605, 3,789] |
+
+Doubling the snippet from 1,000 to 2,000 lines makes the pass × 3.83 slower. Another build was running on the machine throughout this run, and an earlier run of the same test, also beside another build, gave × 4.34. The N = 2,000 passes ran under a JFR recording of 2,274 samples. `DocumentWindowImpl.isValid` is on 76.0% of them, and 72.0% of all samples reach it through `LineMarkersPass.queryLineMarkersForInjected` → `queryProviders` → `RunLineMarkerProvider.getLineMarkerInfo` → `LeafPsiElement.getContainingFile`: the same path as the XML cells.
+
 
 ## Summary
 
@@ -65,6 +78,7 @@ Gradle needs JDK 21. [`mise.toml`](mise.toml) pins JBR 21.0.11, which the figure
 | [`testMainSweep`][test-main] | passes | reports the main table and records the JFR |
 | [`testDepthSweep`][test-depth] | passes | reports the depth table |
 | [`testKeystrokeInHost`][test-keystroke] | passes | reports the pass after typing one character into the host |
+| [`testJavadocSnippetSweep`][test-javadoc] | passes | on this branch only: reports the platform's `JavadocInjector` over an N-line `{@snippet}` |
 
 The failures from the run below:
 
@@ -240,6 +254,7 @@ The other per-place frames are separate costs, each O(places) per call, and none
 [injector]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L51-L80
 [test-main]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L205-L214
 [test-depth]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L216-L219
+[test-javadoc]: https://github.com/sh41/injected-shred-isvalid-repro/blob/2026.3/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L317-L357
 [test-keystroke]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L248-L261
 [test-control]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L263-L275
 [test-per-line]: https://github.com/sh41/injected-shred-isvalid-repro/blob/main/src/test/kotlin/com/github/sh41/injectedshredisvalidrepro/InjectedShredIsValidTest.kt#L277-L298
